@@ -53,19 +53,19 @@ class post:
   def GET(self, action):
     if action == 'benchmark':
       # display performance statistics for the current classifier.
-      (X,y) = eticlassifier.getPostData(username=web.MYSQL_USERNAME, password=web.MYSQL_PASSWORD, database='seinma_lltrolls')
+      (X,y) = etiClassifier.getPostData(username=web.MYSQL_USERNAME, password=web.MYSQL_PASSWORD, database='seinma_lltrolls')
       splitDataPoint = int(math.floor(7*len(X)/10))
       
-      (X_train_tfidf,count_vect,tfidf_transformer) = eticlassifier.transformData(X, count_vect=web.trollCountVectorizer, tfidf_transformer=web.trollTfIdfTransformer)
-      return eticlassifier.getClassifierPerformance([classifier for classifier in web.trollClassifier], X_train_tfidf[splitDataPoint:], y[splitDataPoint:])
+      (X_train_tfidf,count_vect,tfidf_transformer) = etiClassifier.transformData(X, count_vect=web.trollCountVectorizer, tfidf_transformer=web.trollTfIdfTransformer)
+      return etiClassifier.getClassifierPerformance([classifier for classifier in web.trollClassifier], X_train_tfidf[splitDataPoint:], y[splitDataPoint:])
     elif action == 'regenerate':
       # pull data from the database and recalculate the classifier parameters.
-      (X,y) = eticlassifier.getPostData(username=web.MYSQL_USERNAME, password=web.MYSQL_PASSWORD, database='seinma_lltrolls')
+      (X,y) = etiClassifier.getPostData(username=web.MYSQL_USERNAME, password=web.MYSQL_PASSWORD, database='seinma_lltrolls')
       splitDataPoint = int(math.floor(7*len(X)/10))
       
-      (X_train_tfidf,count_vect,tfidf_transformer) = eticlassifier.transformData(X, nGram=2)
-      (bayesianClassifier,l1Classifier, l2Classifier, svcClassifier) = eticlassifier.trainClassifiers(X_train_tfidf[0:splitDataPoint], y[0:splitDataPoint])
-      eticlassifier.dumpClassifier(l2Classifier,count_vect,tfidf_transformer)
+      (X_train_tfidf,count_vect,tfidf_transformer) = etiClassifier.transformData(X, nGram=2)
+      (bayesianClassifier,l1Classifier, l2Classifier, svcClassifier) = etiClassifier.trainClassifiers(X_train_tfidf[0:splitDataPoint], y[0:splitDataPoint])
+      etiClassifier.dumpClassifier(l2Classifier,count_vect,tfidf_transformer)
       web.trollCountVectorizer = count_vect
       web.trollTfIdfTransformer = tfidf_transformer
       web.trollClassifier = (l1Classifier, svcClassifier, l2Classifier, bayesianClassifier)
@@ -83,7 +83,7 @@ class post:
       if 'text' not in postFields:
         return "Please provide some text for analysis."
       else:
-        transformedText = eticlassifier.transformData([eticlassifier.stripPostHTML(postFields.text)], count_vect=web.trollCountVectorizer, tfidf_transformer=web.trollTfIdfTransformer)[0]
+        transformedText = etiClassifier.transformData([etiClassifier.stripPostHTML(postFields.text)], count_vect=web.trollCountVectorizer, tfidf_transformer=web.trollTfIdfTransformer)[0]
         return str(round(100*web.trollClassifier[0].predict_proba(transformedText)[0], 2))
     else:
       return "Please specify a valid action."
@@ -178,7 +178,7 @@ class topic:
         if topicInfo is not None:
           topicString = " ".join([unicode(text) for text in topicInfo])
           for tagID in relevantTags:
-            transformedText = eticlassifier.transformData([eticlassifier.stripPostHTML(topicString)], count_vect=relevantTags[tagID][2], tfidf_transformer=relevantTags[tagID][3])[0]
+            transformedText = etiClassifier.transformData([etiClassifier.stripPostHTML(topicString)], count_vect=relevantTags[tagID][2], tfidf_transformer=relevantTags[tagID][3])[0]
             tagList.append({'id': tagID, 'name': relevantTags[tagID][0], 'prob': round(relevantTags[tagID][1][0].predict_proba(transformedText)[0], 4), 'subscriptionCount': relevantTags[tagID][4]})
           
           topicDict['tags'] = tagList
@@ -239,11 +239,11 @@ class topic:
        # tagInfo = tagInfo
       
       # update classifier with new data.
-      (X, y) = eticlassifier.getTopicData(tagInfo[0], username=web.MYSQL_USERNAME, password=web.MYSQL_PASSWORD, database=web.MYSQL_DATABASE)
+      (X, y) = etiClassifier.getTopicData(tagInfo[0], username=web.MYSQL_USERNAME, password=web.MYSQL_PASSWORD, database=web.MYSQL_DATABASE)
       if len(X) > 1 and 0 in y and 1 in y:
-        eticlassifier.shuffle_in_unison(X, y)
-        (X_train_tfidf,count_vect,tfidf_transformer) = eticlassifier.transformData(X)
-        (classifier) = eticlassifier.trainClassifiers(X_train_tfidf, y, classifiers=["l2log"])
+        etiClassifier.shuffle_in_unison(X, y)
+        (X_train_tfidf,count_vect,tfidf_transformer) = etiClassifier.transformData(X)
+        (classifier) = etiClassifier.trainClassifiers(X_train_tfidf, y, classifiers=["l2log"])
         web.dbCursor.execute(u'''UPDATE `tags` SET `classifier` = %s, `countVectorizer` = %s, `tfidfTransformer` = %s WHERE `tagid` = %s LIMIT 1''', [pickle.dumps(classifier), pickle.dumps(count_vect), pickle.dumps(tfidf_transformer), str(tagInfo[0])])
       
       return json.dumps({'id': tagInfo[0], 'name': postFields.tag, 'subscriptionCount': tagInfo[1]})
@@ -312,13 +312,13 @@ class tag:
       ) AS `postCount`, 
       (
         SELECT `date` FROM `posts` WHERE `posts`.`ll_topicid` = `topics`.`ll_topicid` ORDER BY `date` DESC LIMIT 1
-      ) AS `lastPostTime` FROM `topics` LEFT OUTER JOIN `taggings` ON `taggings`.`topicid` = `topics`.`ll_topicid` LEFT OUTER JOIN `ll_users` ON `topics`.`userid` = `ll_users`.`userid` WHERE `taggings`.`tagid` = %s''', [str(getFields.tag)])
+      ) AS `lastPostTime` FROM `topics` LEFT OUTER JOIN `taggings` ON `taggings`.`ll_topicid` = `topics`.`ll_topicid` LEFT OUTER JOIN `ll_users` ON `topics`.`userid` = `ll_users`.`userid` WHERE `taggings`.`tagid` = %s''', [str(getFields.tag)])
       taggingCursor = web.dbConn.cursor()
       taggedTopics = []
       topicInfo = web.dbCursor.fetchone()
       while topicInfo is not None:
         # get this topic's tag info.
-        taggingCursor.execute(u'''SELECT `taggings`.`tagid`, `tags`.`name`, `taggings`.`prob`, `tags`.`userid` FROM `taggings` LEFT OUTER JOIN `tags` ON `tags`.`tagid` = `taggings`.`tagid` WHERE `taggings`.`topicid` = %s''', [str(topicInfo[0])])
+        taggingCursor.execute(u'''SELECT `taggings`.`tagid`, `tags`.`name`, `taggings`.`prob`, `tags`.`userid` FROM `taggings` LEFT OUTER JOIN `tags` ON `tags`.`tagid` = `taggings`.`tagid` WHERE `taggings`.`ll_topicid` = %s''', [str(topicInfo[0])])
         topicTags = [{'id': taggingInfo[0], 'name': taggingInfo[1], 'prob': taggingInfo[2]} for taggingInfo in taggingCursor.fetchall()]
         taggedTopics.append({'id': topicInfo[0], 'title': topicInfo[1], 'creator': {'id': topicInfo[2], 'username': topicInfo[3]}, 'postCount': topicInfo[4], 'lastPostTime': topicInfo[5], 'tags': topicTags})
         topicInfo = web.dbCursor.fetchone()
@@ -646,10 +646,10 @@ class subscription:
         return -2
         
       # fetch topics and tag IDs/names belonging to this user's subscriptions.
-      web.dbCursor.execute(u'''SELECT `taggings`.`topicid`, `taggings`.`tagid`, `tags`.`name`, `taggings`.`prob`, `tags`.`userid`, 
+      web.dbCursor.execute(u'''SELECT `taggings`.`ll_topicid`, `taggings`.`tagid`, `tags`.`name`, `taggings`.`prob`, `tags`.`userid`, 
       (
         SELECT COUNT(*) FROM `subscriptions` WHERE `subscriptions`.`tagid` = `taggings`.`tagid`
-      ) AS `subscriptionCounts` FROM `subscriptions` LEFT OUTER JOIN `taggings` ON `taggings`.`tagid` = `subscriptions`.`tagid` LEFT OUTER JOIN `tags` ON `subscriptions`.`tagid` = `tags`.`tagid` WHERE `subscriptions`.`userid` = %s ORDER BY `taggings`.`topicid` DESC''', [str(userInfo[0])])
+      ) AS `subscriptionCounts` FROM `subscriptions` LEFT OUTER JOIN `taggings` ON `taggings`.`tagid` = `subscriptions`.`tagid` LEFT OUTER JOIN `tags` ON `subscriptions`.`tagid` = `tags`.`tagid` WHERE `subscriptions`.`userid` = %s ORDER BY `taggings`.`ll_topicid` DESC''', [str(userInfo[0])])
       topicCursor = web.dbConn.cursor()
       subscribedTopics = []
       addedTopicIDs = {}

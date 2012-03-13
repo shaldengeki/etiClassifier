@@ -1,4 +1,9 @@
-# !/usr/bin/env python
+#!/usr/bin/python
+# Copyright 2010 Shal Dengeki
+# Licensed under the WTF Public License, Version 2.0
+# http://sam.zoy.org/wtfpl/COPYING
+# Provides some basic topic- and post-classification functions for ETI.
+
 import MySQLdb
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.feature_extraction.text import WordNGramAnalyzer

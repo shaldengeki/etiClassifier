@@ -1,1 +1,5 @@
 etiClassifier/*.txt
+etiClassifier.egg-info
+*.pyc
+build
+dist
