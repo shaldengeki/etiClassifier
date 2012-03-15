@@ -89,25 +89,30 @@ class post:
       return "Please specify a valid action."
 
 class topic:
-  def checkDBConnection(self):
-    if datetime.datetime.now() > web.lastQueryTime + datetime.timedelta(minutes=60):
+  def queryDB(self, query, args):
+    try:
+      cursor = web.dbConn.cursor()
+      cursor.execute(query, args)
+      return cursor
+    except MySQLdb.OperationalError:
+      # lost connect. reconnect and re-query.
       web.dbConn = MySQLdb.connect('localhost', web.MYSQL_USERNAME, web.MYSQL_PASSWORD, web.MYSQL_DATABASE, use_unicode=True)
-      web.dbCursor = web.dbConn.cursor()
-    web.lastQueryTime = datetime.datetime.now()
-  
+      cursor = web.dbConn.cursor()
+      cursor.execute(query, args)
+      return cursor
   def authenticateUser(self, username):
     # first, see if this request needs to be rejected.
     attemptCutoff = datetime.datetime.now() - datetime.timedelta(minutes=10)
-    web.dbCursor.execute(u'''SELECT COUNT(*) FROM `authAttempts` WHERE (`ip` = %s && `date` >= %s && `type` = 0)''', [str(web.ctx['ip']), str(time.mktime(attemptCutoff.timetuple()))])
-    authAttempts = int(web.dbCursor.fetchone()[0])
+    cursor = self.queryDB(u'''SELECT COUNT(*) FROM `authAttempts` WHERE (`ip` = %s && `date` >= %s && `type` = 0)''', [str(web.ctx['ip']), str(time.mktime(attemptCutoff.timetuple()))])
+    authAttempts = int(cursor.fetchone()[0])
     if authAttempts > 3:
       return False
     
     # see if this request's IP matches the last IP in our users table.
-    web.dbCursor.execute(u'''SELECT `userid`, `last_ip` FROM `ll_users` WHERE `username` = %s LIMIT 1''', [str(username)])
-    if web.dbCursor.rowcount < 1:
+    cursor = self.queryDB(u'''SELECT `userid`, `last_ip` FROM `ll_users` WHERE `username` = %s LIMIT 1''', [str(username)])
+    if cursor.rowcount < 1:
       return False
-    userInfo = web.dbCursor.fetchone()
+    userInfo = cursor.fetchone()
     if userInfo[1] != web.ctx['ip']:
       # check LL to see if this IP lines up.
       validateIP = urllib2.urlopen('http://boards.endoftheinter.net/scripts/login.php?username=' + str(username) + '&ip=' + str(web.ctx['ip']))
@@ -115,11 +120,11 @@ class topic:
       if validateIP != "1:" + username:
         # this doesn't line up. return auth error and log attempt.
         attemptTime = time.mktime(datetime.datetime.now().timetuple())
-        web.dbCursor.execute(u'''INSERT INTO `authAttempts` (`date`, `userid`, `ip`, `type`) VALUES (%s, %s, %s, %s)''', [str(attemptTime), str(userInfo[0]), str(web.ctx['ip']), str(0)])
+        self.queryDB(u'''INSERT INTO `authAttempts` (`date`, `userid`, `ip`, `type`) VALUES (%s, %s, %s, %s)''', [str(attemptTime), str(userInfo[0]), str(web.ctx['ip']), str(0)])
         return False
       else:
         # this lines up. update the IP in our table.
-        web.dbCursor.execute(u'''UPDATE `ll_users` SET `last_ip` = %s WHERE `userid` = %s LIMIT 1''', [str(web.ctx['ip']), str(userInfo[0])])
+        self.queryDB(u'''UPDATE `ll_users` SET `last_ip` = %s WHERE `userid` = %s LIMIT 1''', [str(web.ctx['ip']), str(userInfo[0])])
         return userInfo
     else:
       return userInfo
@@ -140,8 +145,6 @@ class topic:
       except (TypeError, ValueError):
         # malformed JSON, topics not iterable, or topicID not numeric.
         return -1
-      # we'll need a valid DB connection, so check it now.
-      self.checkDBConnection()
         
       if 'username' in getFields:
         # user is requesting just the tags s/he is subscribed to.
@@ -150,20 +153,20 @@ class topic:
         if not userInfo:
           return -2
         # now load the relevant tags.
-        web.dbCursor.execute(u'''SELECT `subscriptions`.`tagid`, `tags`.`name`, `tags`.`classifier`, `tags`.`countVectorizer`, `tags`.`tfidfTransformer`, 
+        cursor = self.queryDB(u'''SELECT `subscriptions`.`tagid`, `tags`.`name`, `tags`.`classifier`, `tags`.`countVectorizer`, `tags`.`tfidfTransformer`, 
           (
             SELECT COUNT(*) FROM `subscriptions` WHERE `subscriptions`.`tagid` = `tags`.`tagid`
           ) AS `subscriptionCount` FROM `subscriptions` LEFT OUTER JOIN `tags` ON `subscriptions`.`tagid` = `tags`.`tagid` WHERE (`subscriptions`.`userid` = %s AND LENGTH(`tags`.`classifier`) > 0) ORDER BY `subscriptionCount` DESC''', [str(userInfo[0])])
         relevantTags = {}
-        tag = web.dbCursor.fetchone()
+        tag = cursor.fetchone()
         while tag is not None:
           try:
             relevantTags[tag[0]] = (tag[1], pickle.loads(tag[2]), pickle.loads(tag[3]), pickle.loads(tag[4]), int(tag[5]))
           except EOFError:
             # this tag is missing a classifier / count vectorizer / tfidf transformer field. skip it.
-            tag = web.dbCursor.fetchone()
+            tag = cursor.fetchone()
             continue
-          tag = web.dbCursor.fetchone()
+          tag = cursor.fetchone()
       else:
         # user is requesting all public tags.
         relevantTags = web.publicTags
@@ -173,13 +176,13 @@ class topic:
         topicDict = {'id': topicID}
         tagList = []
         # get topic title and OP.
-        web.dbCursor.execute(u'''SELECT `topics`.`title`, `posts`.`messagetext` FROM `topics` LEFT OUTER JOIN `posts` ON `topics`.`ll_topicid` = `posts`.`ll_topicid` WHERE `topics`.`ll_topicid` = %s ORDER BY `posts`.`date` ASC LIMIT 1''', [str(topicID)])
-        topicInfo = web.dbCursor.fetchone()
+        cursor = self.queryDB(u'''SELECT `topics`.`title`, `posts`.`messagetext` FROM `topics` LEFT OUTER JOIN `posts` ON `topics`.`ll_topicid` = `posts`.`ll_topicid` WHERE `topics`.`ll_topicid` = %s ORDER BY `posts`.`date` ASC LIMIT 1''', [str(topicID)])
+        topicInfo = cursor.fetchone()
         if topicInfo is not None:
           topicString = " ".join([unicode(text) for text in topicInfo])
           for tagID in relevantTags:
             transformedText = etiClassifier.transformData([etiClassifier.stripPostHTML(topicString)], count_vect=relevantTags[tagID][2], tfidf_transformer=relevantTags[tagID][3])[0]
-            tagList.append({'id': tagID, 'name': relevantTags[tagID][0], 'prob': round(relevantTags[tagID][1][0].predict_proba(transformedText)[0], 4), 'subscriptionCount': relevantTags[tagID][4]})
+            tagList.append({'id': tagID, 'name': relevantTags[tagID][0], 'prob': "%.4f" % round(relevantTags[tagID][1][0].predict_proba(transformedText)[0], 4), 'subscriptionCount': relevantTags[tagID][4]})
           
           topicDict['tags'] = tagList
           returnList.append(topicDict)
@@ -210,8 +213,6 @@ class topic:
       if len(postFields.tag) < 3 or postFields.topic <= 0 or (postFields.type != 0 and postFields.type != 1):
         # specific values of these parameters is incorrect.
         return -1
-      # we'll need a valid DB connection, so check it now.
-      self.checkDBConnection()
       
       userInfo = self.authenticateUser(postFields.username)
       if not userInfo:
@@ -219,24 +220,20 @@ class topic:
 
       # user is authenticated. proceed with classification submission.
       # see if this tag already exists in the table.
-      web.dbCursor.execute(u'''SELECT `tagid`, (
+      cursor = self.queryDB(u'''SELECT `tagid`, (
         SELECT COUNT(*) FROM `subscriptions` WHERE `subscriptions`.`tagid` = `tags`.`tagid`
       ) AS `subscriptionCount` FROM `tags` WHERE `userid` = %s AND `name` = %s LIMIT 1''', [str(userInfo[0]), str(postFields.tag)])
-      if web.dbCursor.rowcount < 1:
+      if cursor.rowcount < 1:
         # new tag. insert and set tagid to be this last-inserted ID.
-        web.dbCursor.execute(u'''INSERT INTO `tags` (`name`, `userid`, `classifier`, `countVectorizer`, `tfidfTransformer`) VALUES (%s, %s, '', '', '')''', [str(postFields.tag), str(userInfo[0])])
+        cursor = self.queryDB(u'''INSERT INTO `tags` (`name`, `userid`, `classifier`, `countVectorizer`, `tfidfTransformer`) VALUES (%s, %s, '', '', '')''', [str(postFields.tag), str(userInfo[0])])
         tagInfo = (web.dbConn.insert_id(), 1)
         # subscribe this user to this tag as well.
-        web.dbCursor.execute(u'''INSERT INTO `subscriptions` (`userid`, `tagid`) VALUES (%s, %s)''', [str(userInfo[0]), str(tagInfo[0])])
+        cursor = self.queryDB(u'''INSERT INTO `subscriptions` (`userid`, `tagid`) VALUES (%s, %s)''', [str(userInfo[0]), str(tagInfo[0])])
       else:
         # pre-existing tag. set tagid to be this ID.
-        tagInfo = web.dbCursor.fetchone()
+        tagInfo = cursor.fetchone()
       # insert this training entry.
-      #try:
-      web.dbCursor.execute(u'''INSERT INTO `tags_training` (`tagid`, `topicid`, `type`, `userid`) VALUES (%s, %s, %s, %s) ON DUPLICATE KEY UPDATE `type` = %s''', [str(tagInfo[0]), str(postFields.topic), str(postFields.type), str(userInfo[0]), str(postFields.type)])
-#      except MySQLdb.IntegrityError:
-        # duplicate training example.
-       # tagInfo = tagInfo
+      cursor = self.queryDB(u'''INSERT INTO `tags_training` (`tagid`, `topicid`, `type`, `userid`) VALUES (%s, %s, %s, %s) ON DUPLICATE KEY UPDATE `type` = %s''', [str(tagInfo[0]), str(postFields.topic), str(postFields.type), str(userInfo[0]), str(postFields.type)])
       
       # update classifier with new data.
       (X, y) = etiClassifier.getTopicData(tagInfo[0], username=web.MYSQL_USERNAME, password=web.MYSQL_PASSWORD, database=web.MYSQL_DATABASE)
@@ -244,31 +241,43 @@ class topic:
         etiClassifier.shuffle_in_unison(X, y)
         (X_train_tfidf,count_vect,tfidf_transformer) = etiClassifier.transformData(X)
         (classifier) = etiClassifier.trainClassifiers(X_train_tfidf, y, classifiers=["l2log"])
-        web.dbCursor.execute(u'''UPDATE `tags` SET `classifier` = %s, `countVectorizer` = %s, `tfidfTransformer` = %s WHERE `tagid` = %s LIMIT 1''', [pickle.dumps(classifier), pickle.dumps(count_vect), pickle.dumps(tfidf_transformer), str(tagInfo[0])])
+        cursor = self.queryDB(u'''UPDATE `tags` SET `classifier` = %s, `countVectorizer` = %s, `tfidfTransformer` = %s WHERE `tagid` = %s LIMIT 1''', [pickle.dumps(classifier), pickle.dumps(count_vect), pickle.dumps(tfidf_transformer), str(tagInfo[0])])
+      
+      # insert or remove a tagging for this topic and this tag.
+      if postFields.type == 0:
+        cursor = self.queryDB(u'''DELETE FROM `taggings` WHERE `tagid` = %s AND `ll_topicid` = %s LIMIT 1''', [str(tagInfo[0]), str(postFields.topic)])
+      else:
+        cursor = self.queryDB(u'''INSERT INTO `taggings` (`tagid`, `ll_topicid`, `prob`) VALUES (%s, %s, 1) ON DUPLICATE KEY UPDATE `prob` = 1''', [str(tagInfo[0]), str(postFields.topic)])
       
       return json.dumps({'id': tagInfo[0], 'name': postFields.tag, 'subscriptionCount': tagInfo[1]})
     else:
       return "Please specify a valid action."
     
 class tag:
-  def checkDBConnection(self):
-    if datetime.datetime.now() > web.lastQueryTime + datetime.timedelta(minutes=60):
+  def queryDB(self, query, args):
+    try:
+      cursor = web.dbConn.cursor()
+      cursor.execute(query, args)
+      return cursor
+    except MySQLdb.OperationalError:
+      # lost connect. reconnect and re-query.
       web.dbConn = MySQLdb.connect('localhost', web.MYSQL_USERNAME, web.MYSQL_PASSWORD, web.MYSQL_DATABASE, use_unicode=True)
-      web.dbCursor = web.dbConn.cursor()
-    web.lastQueryTime = datetime.datetime.now()
-  
+      cursor = web.dbConn.cursor()
+      cursor.execute(query, args)
+      return cursor
   def authenticateUser(self, username):
     # first, see if this request needs to be rejected.
     attemptCutoff = datetime.datetime.now() - datetime.timedelta(minutes=10)
-    web.dbCursor.execute(u'''SELECT COUNT(*) FROM `authAttempts` WHERE `ip` = %s AND `date` >= %s''', [str(web.ctx['ip']), str(time.mktime(attemptCutoff.timetuple()))])
-    authAttempts = int(web.dbCursor.fetchone()[0])
+    cursor = self.queryDB(u'''SELECT COUNT(*) FROM `authAttempts` WHERE (`ip` = %s && `date` >= %s && `type` = 0)''', [str(web.ctx['ip']), str(time.mktime(attemptCutoff.timetuple()))])
+    authAttempts = int(cursor.fetchone()[0])
     if authAttempts > 3:
       return False
+    
     # see if this request's IP matches the last IP in our users table.
-    web.dbCursor.execute(u'''SELECT `userid`, `last_ip` FROM `ll_users` WHERE `username` = %s LIMIT 1''', [str(username)])
-    if web.dbCursor.rowcount < 1:
+    cursor = self.queryDB(u'''SELECT `userid`, `last_ip` FROM `ll_users` WHERE `username` = %s LIMIT 1''', [str(username)])
+    if cursor.rowcount < 1:
       return False
-    userInfo = web.dbCursor.fetchone()
+    userInfo = cursor.fetchone()
     if userInfo[1] != web.ctx['ip']:
       # check LL to see if this IP lines up.
       validateIP = urllib2.urlopen('http://boards.endoftheinter.net/scripts/login.php?username=' + str(username) + '&ip=' + str(web.ctx['ip']))
@@ -276,11 +285,37 @@ class tag:
       if validateIP != "1:" + username:
         # this doesn't line up. return auth error and log attempt.
         attemptTime = time.mktime(datetime.datetime.now().timetuple())
-        web.dbCursor.execute(u'''INSERT INTO `authAttempts` (`date`, `userid`, `ip`, `type`) VALUES (%s, %s, %s, %s)''', [str(attemptTime), str(userInfo[0]), str(web.ctx['ip']), str(0)])
+        self.queryDB(u'''INSERT INTO `authAttempts` (`date`, `userid`, `ip`, `type`) VALUES (%s, %s, %s, %s)''', [str(attemptTime), str(userInfo[0]), str(web.ctx['ip']), str(0)])
         return False
       else:
         # this lines up. update the IP in our table.
-        web.dbCursor.execute(u'''UPDATE `ll_users` SET `last_ip` = %s WHERE `userid` = %s LIMIT 1''', [str(web.ctx['ip']), str(userInfo[0])])
+        self.queryDB(u'''UPDATE `ll_users` SET `last_ip` = %s WHERE `userid` = %s LIMIT 1''', [str(web.ctx['ip']), str(userInfo[0])])
+        return userInfo
+    else:
+      return userInfo
+    # first, see if this request needs to be rejected.
+    attemptCutoff = datetime.datetime.now() - datetime.timedelta(minutes=10)
+    cursor = self.queryDB(u'''SELECT COUNT(*) FROM `authAttempts` WHERE `ip` = %s AND `date` >= %s''', [str(web.ctx['ip']), str(time.mktime(attemptCutoff.timetuple()))])
+    authAttempts = int(cursor.fetchone()[0])
+    if authAttempts > 3:
+      return False
+    # see if this request's IP matches the last IP in our users table.
+    cursor = self.queryDB(u'''SELECT `userid`, `last_ip` FROM `ll_users` WHERE `username` = %s LIMIT 1''', [str(username)])
+    if cursor.rowcount < 1:
+      return False
+    userInfo = cursor.fetchone()
+    if userInfo[1] != web.ctx['ip']:
+      # check LL to see if this IP lines up.
+      validateIP = urllib2.urlopen('http://boards.endoftheinter.net/scripts/login.php?username=' + str(username) + '&ip=' + str(web.ctx['ip']))
+      validateIP = validateIP.read()
+      if validateIP != "1:" + username:
+        # this doesn't line up. return auth error and log attempt.
+        attemptTime = time.mktime(datetime.datetime.now().timetuple())
+        self.queryDB(u'''INSERT INTO `authAttempts` (`date`, `userid`, `ip`, `type`) VALUES (%s, %s, %s, %s)''', [str(attemptTime), str(userInfo[0]), str(web.ctx['ip']), str(0)])
+        return False
+      else:
+        # this lines up. update the IP in our table.
+        self.queryDB(u'''UPDATE `ll_users` SET `last_ip` = %s WHERE `userid` = %s LIMIT 1''', [str(web.ctx['ip']), str(userInfo[0])])
         return userInfo
     else:
       return userInfo
@@ -293,20 +328,18 @@ class tag:
       # check to ensure that request is well-formed and that user is authenticated to view this tag.
       if 'tag' not in getFields or 'username' not in getFields:
         return -1
-      # we'll need a valid DB connection, so check it now.
-      self.checkDBConnection()
       userInfo = self.authenticateUser(getFields.username)
       if not userInfo:
         return -2
       # check to make sure this tag is owned by this user or that it's public.
-      web.dbCursor.execute(u'''SELECT `userid`, `public` FROM `tags` WHERE `tagid` = %s LIMIT 1''', [str(getFields.tag)])
-      if web.dbCursor.rowcount < 1:
+      cursor = self.queryDB(u'''SELECT `userid`, `public` FROM `tags` WHERE `tagid` = %s LIMIT 1''', [str(getFields.tag)])
+      if cursor.rowcount < 1:
         return -3
-      tagInfo = web.dbCursor.fetchone()
+      tagInfo = cursor.fetchone()
       if tagInfo[0] != userInfo[0] and tagInfo[1] == "0":
         return -4
       # otherwise, go ahead with the display.
-      web.dbCursor.execute(u'''SELECT `topics`.`ll_topicid`, `topics`.`title`, `topics`.`userid`, `ll_users`.`username`, 
+      cursor = self.queryDB(u'''SELECT `topics`.`ll_topicid`, `topics`.`boardid`, `topics`.`title`, `topics`.`userid`, `ll_users`.`username`, 
       (
         SELECT COUNT(*) FROM `posts` WHERE `posts`.`ll_topicid` = `topics`.`ll_topicid`
       ) AS `postCount`, 
@@ -315,13 +348,13 @@ class tag:
       ) AS `lastPostTime` FROM `topics` LEFT OUTER JOIN `taggings` ON `taggings`.`ll_topicid` = `topics`.`ll_topicid` LEFT OUTER JOIN `ll_users` ON `topics`.`userid` = `ll_users`.`userid` WHERE `taggings`.`tagid` = %s''', [str(getFields.tag)])
       taggingCursor = web.dbConn.cursor()
       taggedTopics = []
-      topicInfo = web.dbCursor.fetchone()
+      topicInfo = cursor.fetchone()
       while topicInfo is not None:
         # get this topic's tag info.
         taggingCursor.execute(u'''SELECT `taggings`.`tagid`, `tags`.`name`, `taggings`.`prob`, `tags`.`userid` FROM `taggings` LEFT OUTER JOIN `tags` ON `tags`.`tagid` = `taggings`.`tagid` WHERE `taggings`.`ll_topicid` = %s''', [str(topicInfo[0])])
-        topicTags = [{'id': taggingInfo[0], 'name': taggingInfo[1], 'prob': taggingInfo[2]} for taggingInfo in taggingCursor.fetchall()]
-        taggedTopics.append({'id': topicInfo[0], 'title': topicInfo[1], 'creator': {'id': topicInfo[2], 'username': topicInfo[3]}, 'postCount': topicInfo[4], 'lastPostTime': topicInfo[5], 'tags': topicTags})
-        topicInfo = web.dbCursor.fetchone()
+        topicTags = [{'id': taggingInfo[0], 'name': taggingInfo[1], 'prob': "%.4f" % taggingInfo[2]} for taggingInfo in taggingCursor.fetchall()]
+        taggedTopics.append({'id': topicInfo[0], 'board': topicInfo[1], 'title': topicInfo[2], 'creator': {'id': topicInfo[3], 'username': topicInfo[4]}, 'postCount': topicInfo[5], 'lastPostTime': topicInfo[6], 'tags': topicTags})
+        topicInfo = cursor.fetchone()
       return json.dumps(taggedTopics)
     
     elif action == 'owned':
@@ -331,14 +364,12 @@ class tag:
       # validate input fields and user auth.
       if 'username' not in getFields:
         return -1
-      # we'll need a valid DB connection, so check it now.
-      self.checkDBConnection()
       userInfo = self.authenticateUser(getFields.username)
       if not userInfo:
         return -2
       # otherwise go ahead and list these tags.
-      web.dbCursor.execute(u'''SELECT `tagid`, `name`, `public` FROM `tags` WHERE `userid` = %s''', [str(userInfo[0])])
-      ownedTags = [{'id': tagInfo[0], 'name': tagInfo[1], 'public': bool(int(tagInfo[2]))} for tagInfo in web.dbCursor.fetchall()]
+      cursor = self.queryDB(u'''SELECT `tagid`, `name`, `public` FROM `tags` WHERE `userid` = %s''', [str(userInfo[0])])
+      ownedTags = [{'id': tagInfo[0], 'name': tagInfo[1], 'public': bool(int(tagInfo[2]))} for tagInfo in cursor.fetchall()]
       return json.dumps(ownedTags)
     
     elif action == 'search':
@@ -349,21 +380,19 @@ class tag:
       # authenticate user.
       if 'username' not in getFields:
         return -1
-      # we'll need a valid DB connection, so check it now.
-      self.checkDBConnection()
       userInfo = self.authenticateUser(getFields.username)
       if not userInfo:
         return -2
       
-      if 'name' in getFields:
+      if 'q' in getFields:
         # search for this particular tag name.
-        searchTerms = getFields.name.split()
+        searchTerms = getFields.q.split()
 
-        web.dbCursor.execute(u'''SELECT `tags`.`tagid`, `tags`.`name`, (
+        cursor = self.queryDB(u'''SELECT `tags`.`tagid`, `tags`.`name`, (
             SELECT COUNT(*) FROM `subscriptions` WHERE `subscriptions`.`tagid` = `tags`.`tagid`
           ) AS `subscriptionCount` FROM `tags` WHERE (`tags`.`public` = 1 OR `tags`.`userid` = %s) AND MATCH(`tags`.`name`) AGAINST(%s IN BOOLEAN MODE) ORDER BY `subscriptionCount` DESC''', [str(userInfo[0]), str(getFields.name)])
 
-        return json.dumps([{'id': tag[0], 'name':tag[1], 'subscriptionCount':tag[2]} for tag in web.dbCursor.fetchall()])
+        return json.dumps([{'id': tag[0], 'name':tag[1], 'subscriptionCount':tag[2]} for tag in cursor.fetchall()])
       else:
         # just get all public tags, which we conveniently have in memory.
         return json.dumps([{'id': tag, 'name':web.publicTags[tag][0], 'subscriptionCount':web.publicTags[tag][4]} for tag in web.publicTags])
@@ -388,23 +417,21 @@ class tag:
         return -1
       if postFields.tag <= 0 or (postFields.public != 0 and postFields.public != 1):
         return -1
-      # we'll need a valid DB connection, so check it now.
-      self.checkDBConnection()
       userInfo = self.authenticateUser(postFields.username)
       if not userInfo:
         return -2
       # check to make sure this tag is owned by this user or that it's public.
-      web.dbCursor.execute(u'''SELECT `tags`.`userid`, `tags`.`public`, `tags`.`name`, `tags`.`classifier`, `tags`.`countVectorizer`, `tags`.`tfidfTransformer`, (
+      cursor = self.queryDB(u'''SELECT `tags`.`userid`, `tags`.`public`, `tags`.`name`, `tags`.`classifier`, `tags`.`countVectorizer`, `tags`.`tfidfTransformer`, (
         SELECT COUNT(*) FROM `subscriptions` WHERE `subscriptions`.`tagid` = `tags`.`tagid`
       ) AS `subscriptionCount` FROM `tags` WHERE `tagid` = %s LIMIT 1''', [str(postFields.tag)])
-      if web.dbCursor.rowcount < 1:
+      if cursor.rowcount < 1:
         return -3
-      tagInfo = web.dbCursor.fetchone()
+      tagInfo = cursor.fetchone()
       if tagInfo[0] != userInfo[0] and tagInfo[1] == "0":
         return -4
       # go ahead with the modification.
       try:
-        web.dbCursor.execute(u'''UPDATE `tags` SET `public` = %s WHERE `tagid` = %s LIMIT 1''', [str(postFields.public), str(postFields.tag)])
+        self.queryDB(u'''UPDATE `tags` SET `public` = %s WHERE `tagid` = %s LIMIT 1''', [str(postFields.public), str(postFields.tag)])
         if postFields.public is 1 and str(postFields.tag) not in web.publicTags:
           web.publicTags[str(postFields.tag)] = (tagInfo[2], tagInfo[3], tagInfo[4], tagInfo[5], tagInfo[6])
         elif postFields.public is 0 and str(postFields.tag) in web.publicTags:
@@ -426,31 +453,29 @@ class tag:
         return -1
       if postFields.tag <= 0:
         return -1
-      # we'll need a valid DB connection, so check it now.
-      self.checkDBConnection()
       userInfo = self.authenticateUser(postFields.username)
       if not userInfo:
         return -2
       # check to make sure this tag is owned by this user.
-      web.dbCursor.execute(u'''SELECT `userid`, `public` FROM `tags` WHERE `tagid` = %s LIMIT 1''', [str(postFields.tag)])
-      if web.dbCursor.rowcount < 1:
+      cursor = self.queryDB(u'''SELECT `userid`, `public` FROM `tags` WHERE `tagid` = %s LIMIT 1''', [str(postFields.tag)])
+      if cursor.rowcount < 1:
         return -3
-      tagInfo = web.dbCursor.fetchone()
+      tagInfo = cursor.fetchone()
       if tagInfo[0] != userInfo[0]:
         return -4
       # go ahead with the modification.
       try:
         # first, delete all the subscriptions belonging to this tag.
-        web.dbCursor.execute(u'''DELETE FROM `subscriptions` WHERE `tagid` = %s''', [str(postFields.tag)])
+        self.queryDB(u'''DELETE FROM `subscriptions` WHERE `tagid` = %s''', [str(postFields.tag)])
         # second, delete all taggings belonging to this tag.
-        web.dbCursor.execute(u'''DELETE FROM `taggings` WHERE `tagid` = %s''', [str(postFields.tag)])
+        self.queryDB(u'''DELETE FROM `taggings` WHERE `tagid` = %s''', [str(postFields.tag)])
         # third, delete all the training data belonging to this tag.
-        web.dbCursor.execute(u'''DELETE FROM `tags_training` WHERE `tagid` = %s''', [str(postFields.tag)])
+        self.queryDB(u'''DELETE FROM `tags_training` WHERE `tagid` = %s''', [str(postFields.tag)])
         # fourth, remove this tag from publicTags (if it needs to be removed).
         if tagInfo[1] is "1":
           del(web.publicTags[str(postFields.tag)])        
         # finally, delete the tag itself.
-        web.dbCursor.execute(u'''DELETE FROM `tags` WHERE `tagid` = %s LIMIT 1''', [str(postFields.tag)])
+        self.queryDB(u'''DELETE FROM `tags` WHERE `tagid` = %s LIMIT 1''', [str(postFields.tag)])
       except:
         return 0
       return 1
@@ -459,24 +484,31 @@ class tag:
       return "Please specify a valid action."
 
 class tagging:
-  def checkDBConnection(self):
-    if datetime.datetime.now() > web.lastQueryTime + datetime.timedelta(minutes=60):
+  def queryDB(self, query, args):
+    try:
+      cursor = web.dbConn.cursor()
+      cursor.execute(query, args)
+      return cursor
+    except MySQLdb.OperationalError:
+      # lost connect. reconnect and re-query.
       web.dbConn = MySQLdb.connect('localhost', web.MYSQL_USERNAME, web.MYSQL_PASSWORD, web.MYSQL_DATABASE, use_unicode=True)
-      web.dbCursor = web.dbConn.cursor()
-    web.lastQueryTime = datetime.datetime.now()
-  
+      cursor = web.dbConn.cursor()
+      cursor.execute(query, args)
+      return cursor
+      
   def authenticateUser(self, username):
     # first, see if this request needs to be rejected.
     attemptCutoff = datetime.datetime.now() - datetime.timedelta(minutes=10)
-    web.dbCursor.execute(u'''SELECT COUNT(*) FROM `authAttempts` WHERE `ip` = %s AND `date` >= %s''', [str(web.ctx['ip']), str(time.mktime(attemptCutoff.timetuple()))])
-    authAttempts = int(web.dbCursor.fetchone()[0])
+    cursor = self.queryDB(u'''SELECT COUNT(*) FROM `authAttempts` WHERE (`ip` = %s && `date` >= %s && `type` = 0)''', [str(web.ctx['ip']), str(time.mktime(attemptCutoff.timetuple()))])
+    authAttempts = int(cursor.fetchone()[0])
     if authAttempts > 3:
       return False
+    
     # see if this request's IP matches the last IP in our users table.
-    web.dbCursor.execute(u'''SELECT `userid`, `last_ip` FROM `ll_users` WHERE `username` = %s LIMIT 1''', [str(username)])
-    if web.dbCursor.rowcount < 1:
+    cursor = self.queryDB(u'''SELECT `userid`, `last_ip` FROM `ll_users` WHERE `username` = %s LIMIT 1''', [str(username)])
+    if cursor.rowcount < 1:
       return False
-    userInfo = web.dbCursor.fetchone()
+    userInfo = cursor.fetchone()
     if userInfo[1] != web.ctx['ip']:
       # check LL to see if this IP lines up.
       validateIP = urllib2.urlopen('http://boards.endoftheinter.net/scripts/login.php?username=' + str(username) + '&ip=' + str(web.ctx['ip']))
@@ -484,11 +516,37 @@ class tagging:
       if validateIP != "1:" + username:
         # this doesn't line up. return auth error and log attempt.
         attemptTime = time.mktime(datetime.datetime.now().timetuple())
-        web.dbCursor.execute(u'''INSERT INTO `authAttempts` (`date`, `userid`, `ip`, `type`) VALUES (%s, %s, %s, %s)''', [str(attemptTime), str(userInfo[0]), str(web.ctx['ip']), str(0)])
+        self.queryDB(u'''INSERT INTO `authAttempts` (`date`, `userid`, `ip`, `type`) VALUES (%s, %s, %s, %s)''', [str(attemptTime), str(userInfo[0]), str(web.ctx['ip']), str(0)])
         return False
       else:
         # this lines up. update the IP in our table.
-        web.dbCursor.execute(u'''UPDATE `ll_users` SET `last_ip` = %s WHERE `userid` = %s LIMIT 1''', [str(web.ctx['ip']), str(userInfo[0])])
+        self.queryDB(u'''UPDATE `ll_users` SET `last_ip` = %s WHERE `userid` = %s LIMIT 1''', [str(web.ctx['ip']), str(userInfo[0])])
+        return userInfo
+    else:
+      return userInfo
+    # first, see if this request needs to be rejected.
+    attemptCutoff = datetime.datetime.now() - datetime.timedelta(minutes=10)
+    cursor = self.queryDB(u'''SELECT COUNT(*) FROM `authAttempts` WHERE `ip` = %s AND `date` >= %s''', [str(web.ctx['ip']), str(time.mktime(attemptCutoff.timetuple()))])
+    authAttempts = int(cursor.fetchone()[0])
+    if authAttempts > 3:
+      return False
+    # see if this request's IP matches the last IP in our users table.
+    cursor = self.queryDB(u'''SELECT `userid`, `last_ip` FROM `ll_users` WHERE `username` = %s LIMIT 1''', [str(username)])
+    if cursor.rowcount < 1:
+      return False
+    userInfo = cursor.fetchone()
+    if userInfo[1] != web.ctx['ip']:
+      # check LL to see if this IP lines up.
+      validateIP = urllib2.urlopen('http://boards.endoftheinter.net/scripts/login.php?username=' + str(username) + '&ip=' + str(web.ctx['ip']))
+      validateIP = validateIP.read()
+      if validateIP != "1:" + username:
+        # this doesn't line up. return auth error and log attempt.
+        attemptTime = time.mktime(datetime.datetime.now().timetuple())
+        self.queryDB(u'''INSERT INTO `authAttempts` (`date`, `userid`, `ip`, `type`) VALUES (%s, %s, %s, %s)''', [str(attemptTime), str(userInfo[0]), str(web.ctx['ip']), str(0)])
+        return False
+      else:
+        # this lines up. update the IP in our table.
+        self.queryDB(u'''UPDATE `ll_users` SET `last_ip` = %s WHERE `userid` = %s LIMIT 1''', [str(web.ctx['ip']), str(userInfo[0])])
         return userInfo
     else:
       return userInfo
@@ -501,8 +559,6 @@ class tagging:
       # check to ensure that request is well-formed and that user is authenticated to view this tag.
       if 'username' not in getFields:
         return -1
-      # we'll need a valid DB connection, so check it now.
-      self.checkDBConnection()
       userInfo = self.authenticateUser(getFields.username)
       if not userInfo:
         return -2
@@ -512,14 +568,14 @@ class tagging:
           getFields.topic = int(getFields.topic)
         except (TypeError, ValueError):
           return -1
-        web.dbCursor.execute(u'''SELECT `tags_training`.`trainingid`, `tags_training`.`tagid`, `tags`.`name`, `tags_training`.`topicid`, `topics`.`title`, `topics`.`userid`, `ll_users`.`username`, `tags_training`.`type` FROM `tags_training` LEFT OUTER JOIN `tags` ON `tags_training`.`tagid` = `tags`.`tagid` LEFT OUTER JOIN `topics` ON `tags_training`.`topicid` = `topics`.`ll_topicid` LEFT OUTER JOIN `ll_users` ON `ll_users`.`userid` = `topics`.`userid` WHERE (`tags_training`.`userid` = %s AND `tags_training`.`topicid` = %s)''', [str(userInfo[0]), str(getFields.topic)])
+        cursor = self.queryDB(u'''SELECT `tags_training`.`trainingid`, `tags_training`.`tagid`, `tags`.`name`, `tags_training`.`topicid`, `topics`.`title`, `topics`.`userid`, `ll_users`.`username`, `tags_training`.`type` FROM `tags_training` LEFT OUTER JOIN `tags` ON `tags_training`.`tagid` = `tags`.`tagid` LEFT OUTER JOIN `topics` ON `tags_training`.`topicid` = `topics`.`ll_topicid` LEFT OUTER JOIN `ll_users` ON `ll_users`.`userid` = `topics`.`userid` WHERE (`tags_training`.`userid` = %s AND `tags_training`.`topicid` = %s)''', [str(userInfo[0]), str(getFields.topic)])
       else:
-        web.dbCursor.execute(u'''SELECT `tags_training`.`trainingid`, `tags_training`.`tagid`, `tags`.`name`, `tags_training`.`topicid`, `topics`.`title`, `topics`.`userid`, `ll_users`.`username`, `tags_training`.`type` FROM `tags_training` LEFT OUTER JOIN `tags` ON `tags_training`.`tagid` = `tags`.`tagid` LEFT OUTER JOIN `topics` ON `tags_training`.`topicid` = `topics`.`ll_topicid` LEFT OUTER JOIN `ll_users` ON `ll_users`.`userid` = `topics`.`userid` WHERE `tags_training`.`userid` = %s''', [str(userInfo[0])])
+        cursor = self.queryDB(u'''SELECT `tags_training`.`trainingid`, `tags_training`.`tagid`, `tags`.`name`, `tags_training`.`topicid`, `topics`.`title`, `topics`.`userid`, `ll_users`.`username`, `tags_training`.`type` FROM `tags_training` LEFT OUTER JOIN `tags` ON `tags_training`.`tagid` = `tags`.`tagid` LEFT OUTER JOIN `topics` ON `tags_training`.`topicid` = `topics`.`ll_topicid` LEFT OUTER JOIN `ll_users` ON `ll_users`.`userid` = `topics`.`userid` WHERE `tags_training`.`userid` = %s''', [str(userInfo[0])])
       trainingList = []
-      trainingInfo = web.dbCursor.fetchone()
+      trainingInfo = cursor.fetchone()
       while trainingInfo is not None:
         trainingList.append({'id': int(trainingInfo[0]), 'tag':{'id': int(trainingInfo[1]), 'name': trainingInfo[2]}, 'topic':{'id': int(trainingInfo[3]), 'title': trainingInfo[4], 'creator': {'id': int(trainingInfo[5]), 'username': trainingInfo[6]}}, 'type': int(trainingInfo[7])})
-        trainingInfo = web.dbCursor.fetchone()
+        trainingInfo = cursor.fetchone()
       return json.dumps(trainingList)
     
     else:
@@ -542,21 +598,19 @@ class tagging:
         return -1
       if postFields.tagging <= 0 or (postFields.type != 0 and postFields.type != 1):
         return -1
-      # we'll need a valid DB connection, so check it now.
-      self.checkDBConnection()
       userInfo = self.authenticateUser(postFields.username)
       if not userInfo:
         return -2
       # check to make sure this tagging is owned by this user.      
-      web.dbCursor.execute(u'''SELECT `userid` FROM `tags_training` WHERE `trainingid` = %s LIMIT 1''', [str(postFields.tagging)])
-      if web.dbCursor.rowcount < 1:
+      cursor = self.queryDB(u'''SELECT `userid` FROM `tags_training` WHERE `trainingid` = %s LIMIT 1''', [str(postFields.tagging)])
+      if cursor.rowcount < 1:
         return -3
-      taggingInfo = web.dbCursor.fetchone()
+      taggingInfo = cursor.fetchone()
       if taggingInfo[0] != userInfo[0]:
         return -4
       # go ahead with the modification.
       try:
-        web.dbCursor.execute(u'''UPDATE `tags_training` SET `type` = %s WHERE `trainingid` = %s LIMIT 1''', [str(postFields.type), str(postFields.tagging)])
+        self.queryDB(u'''UPDATE `tags_training` SET `type` = %s WHERE `trainingid` = %s LIMIT 1''', [str(postFields.type), str(postFields.tagging)])
       except:
         return 0
       return 1
@@ -574,22 +628,20 @@ class tagging:
         return -1
       if postFields.tagging <= 0:
         return -1
-      # we'll need a valid DB connection, so check it now.
-      self.checkDBConnection()
       userInfo = self.authenticateUser(postFields.username)
       if not userInfo:
         return -2
       # check to make sure this tagging is owned by this user.
-      web.dbCursor.execute(u'''SELECT `userid` FROM `tags_training` WHERE `trainingid` = %s LIMIT 1''', [str(postFields.tagging)])
-      if web.dbCursor.rowcount < 1:
+      cursor = self.queryDB(u'''SELECT `userid` FROM `tags_training` WHERE `trainingid` = %s LIMIT 1''', [str(postFields.tagging)])
+      if cursor.rowcount < 1:
         return -3
-      tagInfo = web.dbCursor.fetchone()
+      tagInfo = cursor.fetchone()
       if tagInfo[0] != userInfo[0]:
         return -4
       # go ahead with the modification.
       try: 
         # delete the tagging itself.
-        web.dbCursor.execute(u'''DELETE FROM `tags_training` WHERE `trainingid` = %s LIMIT 1''', [str(postFields.tagging)])
+        self.queryDB(u'''DELETE FROM `tags_training` WHERE `trainingid` = %s LIMIT 1''', [str(postFields.tagging)])
       except:
         return 0
       return 1
@@ -597,24 +649,31 @@ class tagging:
       return "Please specify a valid action."
       
 class subscription:
-  def checkDBConnection(self):
-    if datetime.datetime.now() > web.lastQueryTime + datetime.timedelta(minutes=60):
+  def queryDB(self, query, args):
+    try:
+      cursor = web.dbConn.cursor()
+      cursor.execute(query, args)
+      return cursor
+    except MySQLdb.OperationalError:
+      # lost connect. reconnect and re-query.
       web.dbConn = MySQLdb.connect('localhost', web.MYSQL_USERNAME, web.MYSQL_PASSWORD, web.MYSQL_DATABASE, use_unicode=True)
-      web.dbCursor = web.dbConn.cursor()
-    web.lastQueryTime = datetime.datetime.now()
-  
+      cursor = web.dbConn.cursor()
+      cursor.execute(query, args)
+      return cursor
+      
   def authenticateUser(self, username):
     # first, see if this request needs to be rejected.
     attemptCutoff = datetime.datetime.now() - datetime.timedelta(minutes=10)
-    web.dbCursor.execute(u'''SELECT COUNT(*) FROM `authAttempts` WHERE `ip` = %s AND `date` >= %s''', [str(web.ctx['ip']), str(time.mktime(attemptCutoff.timetuple()))])
-    authAttempts = int(web.dbCursor.fetchone()[0])
+    cursor = self.queryDB(u'''SELECT COUNT(*) FROM `authAttempts` WHERE (`ip` = %s && `date` >= %s && `type` = 0)''', [str(web.ctx['ip']), str(time.mktime(attemptCutoff.timetuple()))])
+    authAttempts = int(cursor.fetchone()[0])
     if authAttempts > 3:
       return False
+    
     # see if this request's IP matches the last IP in our users table.
-    web.dbCursor.execute(u'''SELECT `userid`, `last_ip` FROM `ll_users` WHERE `username` = %s LIMIT 1''', [str(username)])
-    if web.dbCursor.rowcount < 1:
+    cursor = self.queryDB(u'''SELECT `userid`, `last_ip` FROM `ll_users` WHERE `username` = %s LIMIT 1''', [str(username)])
+    if cursor.rowcount < 1:
       return False
-    userInfo = web.dbCursor.fetchone()
+    userInfo = cursor.fetchone()
     if userInfo[1] != web.ctx['ip']:
       # check LL to see if this IP lines up.
       validateIP = urllib2.urlopen('http://boards.endoftheinter.net/scripts/login.php?username=' + str(username) + '&ip=' + str(web.ctx['ip']))
@@ -622,11 +681,37 @@ class subscription:
       if validateIP != "1:" + username:
         # this doesn't line up. return auth error and log attempt.
         attemptTime = time.mktime(datetime.datetime.now().timetuple())
-        web.dbCursor.execute(u'''INSERT INTO `authAttempts` (`date`, `userid`, `ip`, `type`) VALUES (%s, %s, %s, %s)''', [str(attemptTime), str(userInfo[0]), str(web.ctx['ip']), str(0)])
+        self.queryDB(u'''INSERT INTO `authAttempts` (`date`, `userid`, `ip`, `type`) VALUES (%s, %s, %s, %s)''', [str(attemptTime), str(userInfo[0]), str(web.ctx['ip']), str(0)])
         return False
       else:
         # this lines up. update the IP in our table.
-        web.dbCursor.execute(u'''UPDATE `ll_users` SET `last_ip` = %s WHERE `userid` = %s LIMIT 1''', [str(web.ctx['ip']), str(userInfo[0])])
+        self.queryDB(u'''UPDATE `ll_users` SET `last_ip` = %s WHERE `userid` = %s LIMIT 1''', [str(web.ctx['ip']), str(userInfo[0])])
+        return userInfo
+    else:
+      return userInfo
+    # first, see if this request needs to be rejected.
+    attemptCutoff = datetime.datetime.now() - datetime.timedelta(minutes=10)
+    cursor = self.queryDB(u'''SELECT COUNT(*) FROM `authAttempts` WHERE `ip` = %s AND `date` >= %s''', [str(web.ctx['ip']), str(time.mktime(attemptCutoff.timetuple()))])
+    authAttempts = int(cursor.fetchone()[0])
+    if authAttempts > 3:
+      return False
+    # see if this request's IP matches the last IP in our users table.
+    cursor = self.queryDB(u'''SELECT `userid`, `last_ip` FROM `ll_users` WHERE `username` = %s LIMIT 1''', [str(username)])
+    if cursor.rowcount < 1:
+      return False
+    userInfo = cursor.fetchone()
+    if userInfo[1] != web.ctx['ip']:
+      # check LL to see if this IP lines up.
+      validateIP = urllib2.urlopen('http://boards.endoftheinter.net/scripts/login.php?username=' + str(username) + '&ip=' + str(web.ctx['ip']))
+      validateIP = validateIP.read()
+      if validateIP != "1:" + username:
+        # this doesn't line up. return auth error and log attempt.
+        attemptTime = time.mktime(datetime.datetime.now().timetuple())
+        self.queryDB(u'''INSERT INTO `authAttempts` (`date`, `userid`, `ip`, `type`) VALUES (%s, %s, %s, %s)''', [str(attemptTime), str(userInfo[0]), str(web.ctx['ip']), str(0)])
+        return False
+      else:
+        # this lines up. update the IP in our table.
+        self.queryDB(u'''UPDATE `ll_users` SET `last_ip` = %s WHERE `userid` = %s LIMIT 1''', [str(web.ctx['ip']), str(userInfo[0])])
         return userInfo
     else:
       return userInfo
@@ -639,26 +724,24 @@ class subscription:
       # ensure that all fields are here and that user is authenticated.
       if 'username' not in getFields:
         return -1
-      # we'll need a valid DB connection, so check it now.
-      self.checkDBConnection()
       userInfo = self.authenticateUser(getFields.username)
       if not userInfo:
         return -2
         
       # fetch topics and tag IDs/names belonging to this user's subscriptions.
-      web.dbCursor.execute(u'''SELECT `taggings`.`ll_topicid`, `taggings`.`tagid`, `tags`.`name`, `taggings`.`prob`, `tags`.`userid`, 
+      cursor = self.queryDB(u'''SELECT `taggings`.`ll_topicid`, `taggings`.`tagid`, `tags`.`name`, `taggings`.`prob`, `tags`.`userid`, 
       (
         SELECT COUNT(*) FROM `subscriptions` WHERE `subscriptions`.`tagid` = `taggings`.`tagid`
       ) AS `subscriptionCounts` FROM `subscriptions` LEFT OUTER JOIN `taggings` ON `taggings`.`tagid` = `subscriptions`.`tagid` LEFT OUTER JOIN `tags` ON `subscriptions`.`tagid` = `tags`.`tagid` WHERE `subscriptions`.`userid` = %s ORDER BY `taggings`.`ll_topicid` DESC''', [str(userInfo[0])])
       topicCursor = web.dbConn.cursor()
       subscribedTopics = []
       addedTopicIDs = {}
-      taggingInfo = web.dbCursor.fetchone()
+      taggingInfo = cursor.fetchone()
       while taggingInfo is not None:
         if taggingInfo[0] is not None:
           if taggingInfo[0] not in addedTopicIDs:
             # set some preliminary topic info.
-            topicCursor.execute(u'''SELECT `topics`.`ll_topicid`, `topics`.`userid`, `ll_users`.`username`, `topics`.`title`, 
+            topicCursor.execute(u'''SELECT `topics`.`ll_topicid`, `topics`.`boardid`, `topics`.`userid`, `ll_users`.`username`, `topics`.`title`, 
             (
               SELECT COUNT(*) FROM `posts` WHERE `posts`.`ll_topicid` = %s
             ) AS `postCount`, 
@@ -666,11 +749,11 @@ class subscription:
               SELECT `date` FROM `posts` WHERE `posts`.`ll_topicid` = %s ORDER BY `date` DESC LIMIT 1
             ) AS `lastPostTime` FROM `topics` LEFT OUTER JOIN `ll_users` ON `topics`.`userid` = `ll_users`.`userid` WHERE `topics`.`ll_topicid` = %s''', [str(taggingInfo[0]), str(taggingInfo[0]), str(taggingInfo[0])])
             topicInfo = topicCursor.fetchone()
-            subscribedTopics.append({'id': taggingInfo[0], 'title':topicInfo[3], 'creator':{'id': topicInfo[1], 'username': topicInfo[2]}, 'postCount':topicInfo[4], 'lastPostTime':topicInfo[5], 'tags': []})
+            subscribedTopics.append({'id': taggingInfo[0], 'board': topicInfo[1], 'title':topicInfo[4], 'creator':{'id': topicInfo[2], 'username': topicInfo[3]}, 'postCount':topicInfo[5], 'lastPostTime':topicInfo[6], 'tags': []})
             addedTopicIDs[taggingInfo[0]] = 1
           # add this tag to the last topic.
-          subscribedTopics[-1]['tags'].append({'id': taggingInfo[1], 'name': taggingInfo[2], 'prob': round(taggingInfo[3], 4), 'subscriptionCount': taggingInfo[5]})
-        taggingInfo = web.dbCursor.fetchone()
+          subscribedTopics[-1]['tags'].append({'id': taggingInfo[1], 'name': taggingInfo[2], 'prob': "%.4f" % round(taggingInfo[3], 4), 'subscriptionCount': taggingInfo[5]})
+        taggingInfo = cursor.fetchone()
       return json.dumps(subscribedTopics)
     elif action == 'list':
       '''
@@ -679,19 +762,17 @@ class subscription:
       # ensure that all fields are here and that user is authenticated.
       if 'username' not in getFields:
         return -1
-      # we'll need a valid DB connection, so check it now.
-      self.checkDBConnection()
       userInfo = self.authenticateUser(getFields.username)
       if not userInfo:
         return -2
         
       # fetch subscriptions belonging to this user.
-      web.dbCursor.execute(u'''SELECT `subscriptions`.`subscriptionid`, `tags`.`name`, `ll_users`.`userid`, `ll_users`.`username` FROM `subscriptions` LEFT OUTER JOIN `tags` ON `subscriptions`.`tagid` = `tags`.`tagid` LEFT OUTER JOIN `ll_users` ON `tags`.`userid` = `ll_users`.`userid` WHERE `subscriptions`.`userid` = %s ORDER BY `tags`.`name` ASC''', [str(userInfo[0])])
+      cursor = self.queryDB(u'''SELECT `subscriptions`.`subscriptionid`, `tags`.`name`, `ll_users`.`userid`, `ll_users`.`username` FROM `subscriptions` LEFT OUTER JOIN `tags` ON `subscriptions`.`tagid` = `tags`.`tagid` LEFT OUTER JOIN `ll_users` ON `tags`.`userid` = `ll_users`.`userid` WHERE `subscriptions`.`userid` = %s ORDER BY `tags`.`name` ASC''', [str(userInfo[0])])
       subscriptions = []
-      subscriptionInfo = web.dbCursor.fetchone()
+      subscriptionInfo = cursor.fetchone()
       while subscriptionInfo is not None:
         subscriptions.append({'id': subscriptionInfo[0], 'name': subscriptionInfo[1], 'creator':{'id': subscriptionInfo[2], 'username': subscriptionInfo[3]}})
-        subscriptionInfo = web.dbCursor.fetchone()
+        subscriptionInfo = cursor.fetchone()
       return json.dumps(subscriptions)
     else:
       return "Please provide a valid action."
@@ -713,21 +794,19 @@ class subscription:
         return -1
       if postFields.tag < 1:
         return -1
-      # we'll need a valid DB connection, so check it now.
-      self.checkDBConnection()
       userInfo = self.authenticateUser(postFields.username)
       if not userInfo:
         return -2
       # check to make sure this tag is owned by this user or that it's public.
-      web.dbCursor.execute(u'''SELECT `userid`, `public` FROM `tags` WHERE `tagid` = %s LIMIT 1''', [str(postFields.tag)])
-      if web.dbCursor.rowcount < 1:
+      cursor = self.queryDB(u'''SELECT `userid`, `public` FROM `tags` WHERE `tagid` = %s LIMIT 1''', [str(postFields.tag)])
+      if cursor.rowcount < 1:
         return -3
-      tagInfo = web.dbCursor.fetchone()
+      tagInfo = cursor.fetchone()
       if tagInfo[0] != userInfo[0] and tagInfo[1] == "0":
         return -4
       # otherwise, go ahead with the subscription.
       try:
-        web.dbCursor.execute(u'''INSERT INTO `subscriptions` (`userid`, `tagid`) VALUES (%s, %s) ON DUPLICATE KEY UPDATE `subscriptionid` = `subscriptionid`''', [str(userInfo[0]), str(postFields.tag)])
+        self.queryDB(u'''INSERT INTO `subscriptions` (`userid`, `tagid`) VALUES (%s, %s) ON DUPLICATE KEY UPDATE `subscriptionid` = `subscriptionid`''', [str(userInfo[0]), str(postFields.tag)])
       except:
         return 0
       return 1
@@ -746,14 +825,12 @@ class subscription:
         return -1
       if postFields.tag < 1:
         return -1
-      # we'll need a valid DB connection, so check it now.
-      self.checkDBConnection()
       userInfo = self.authenticateUser(postFields.username)
       if not userInfo:
         return -2
       # otherwise, go ahead with the unsubscription.
       try:
-        web.dbCursor.execute(u'''DELETE FROM `subscriptions` WHERE `userid` = %s AND `tagid` = %s LIMIT 1''', [str(userInfo[0]), str(postFields.tag)])
+        self.queryDB(u'''DELETE FROM `subscriptions` WHERE `userid` = %s AND `tagid` = %s LIMIT 1''', [str(userInfo[0]), str(postFields.tag)])
       except:
         return 0
       return 1
@@ -797,26 +874,25 @@ if __name__ == "__main__":
     web.MYSQL_DATABASE = mysqlDatabases[0]
     openCredentialsFile.close()
     
-    # create database objects.
+    # create database connection..
     web.dbConn = MySQLdb.connect('localhost', web.MYSQL_USERNAME, web.MYSQL_PASSWORD, web.MYSQL_DATABASE, use_unicode=True)
-    web.dbCursor = web.dbConn.cursor()
-    web.lastQueryTime = datetime.datetime.now()
+    cursor = web.dbConn.cursor()
     
     # load all public tags into memory.
-    web.dbCursor.execute(u'''SELECT `tags`.`tagid`, `tags`.`name`, `tags`.`classifier`, `tags`.`countVectorizer`, `tags`.`tfidfTransformer`, 
+    cursor.execute(u'''SELECT `tags`.`tagid`, `tags`.`name`, `tags`.`classifier`, `tags`.`countVectorizer`, `tags`.`tfidfTransformer`, 
       (
         SELECT COUNT(*) FROM `subscriptions` WHERE `subscriptions`.`tagid` = `tags`.`tagid`
       ) AS `subscriptionCount` FROM `tags` WHERE (`tags`.`public` = 1 AND LENGTH(`tags`.`classifier`) > 0) ORDER BY `subscriptionCount` DESC''')
     web.publicTags = {}
-    tag = web.dbCursor.fetchone()
+    tag = cursor.fetchone()
     while tag is not None:
       try:
         web.publicTags[tag[0]] = (tag[1], pickle.loads(tag[2]), pickle.loads(tag[3]), pickle.loads(tag[4]), int(tag[5]))
       except EOFError:
         # missing a classifier / count vectorizer / tfidf transformer field. skip it.
-        tag = web.dbCursor.fetchone()
+        tag = cursor.fetchone()
         continue
-      tag = web.dbCursor.fetchone()
+      tag = cursor.fetchone()
 
   except:
     print "Could not instantiate classifier or database objects."
